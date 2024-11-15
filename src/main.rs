@@ -1,9 +1,55 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
 use std::collections::btree_map::Range;
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 use std::vec;
 use std::collections; // Need for BST and Queue
 use rand; // Need for RNG and distributions
+
+//// HYPERPARAMETRS ////
+const NUMBER_OF_TRAINS : u8 = 20;
+const TRAIN_CAPACITY : u8 = 100;
+const TRAIN_ASSIST_CAPACITY : u8 = 10;
+const SIMULATION_LENGTH : f32 = 1320.0;
+
+struct Simulation { // Holds the Line and the list of trains on it
+    line : Line,
+    train_list : Vec<Train>,
+    time_elapsed : f32,
+    future_event_list : BinaryHeap<DiscreteEvent>,
+}
+
+
+enum EventTypes {
+    TrainArrival(usize, usize), // TRAIN ID, STATION ID
+    TrainDeparture(usize, usize), // TRAIN ID, NEXT STATION ID
+}
+
+struct DiscreteEvent {
+    event : EventTypes,
+    time : f32,
+}
+
+impl Ord for DiscreteEvent {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.time.total_cmp(&other.time)
+    }
+}
+
+impl PartialOrd for DiscreteEvent {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Eq for DiscreteEvent {}
+
+impl PartialEq for DiscreteEvent {
+    fn eq(&self, other: &Self) -> bool {
+        (self.time) == (other.time)
+    }
+}
 
 struct Station {
     name: String,
@@ -20,7 +66,6 @@ impl Station {
     fn add_customer(&mut self, new_cust: Customer) {
         self.customers.push(new_cust);
     }
-
 
 }
 
@@ -39,12 +84,34 @@ impl Line {
         return Line {stations: station_vec, name: line_name};
     }
 
+    fn add_cust_at(&mut self, new_cust: Customer, station_index: usize) {
+        self.stations[station_index].customers.push(new_cust);
+    }
+
 }
 
 #[derive(Debug)]
 struct Train {
+    id: u8,
     capacity: u8,
     assist_capacity: u8, // Priority seating
+    active: bool, // Wether or not this train is in our system or on standby
+    to_station: u8, // Current station we are at (or are headed to)
+    in_motion: bool, // If this train is between stations or not
+}
+
+impl Train {
+
+    fn new(new_id : u8) -> Train {
+        return Train{id : new_id, capacity : TRAIN_CAPACITY, assist_capacity : TRAIN_ASSIST_CAPACITY, 
+            active : false, to_station : 0, in_motion : false};
+    }
+
+    fn arrive_at(mut self, station_id : u8) {
+        self.in_motion = false;
+        self.to_station = station_id;
+    }
+
 }
 
 #[derive(Debug)]
@@ -70,16 +137,29 @@ fn main() {
     // Main simulation loop
     
     // Initalize
-
     // Create Millenium Line
-    let mil_line_station_names = ["VCC-Clark", "Commercial–Broadway", "Renfrew", "Rupert", "Gilmore", "Brentwood Town Centre",
+    let m_line_station_names = ["VCC-Clark", "Commercial–Broadway", "Renfrew", "Rupert", "Gilmore", "Brentwood Town Centre",
                                             "Holdom", "Sperling–Burnaby Lake", "Lake City Way", "Production Way–University", "Lougheed Town Centre"];
 
-    let mut millennium_line: Line = Line::new(String::from("Millennium Line"), &mil_line_station_names);
+    let millennium_line: Line = Line::new(String::from("Millennium Line"), &m_line_station_names);
 
     for i in 0..millennium_line.stations.len() {
-        millennium_line.stations[i].add_customer(Customer::empty());
         println!("{} with {} customer", millennium_line.stations[i].name, millennium_line.stations[i].customers.len());
+    }
+
+    // Load Trains
+    let mut train_list: Vec<Train> = Vec::new();
+    for i in 0..NUMBER_OF_TRAINS {
+        train_list.push(Train::new(i));
+    }
+
+    // FEL
+    let future_event_list : BinaryHeap<DiscreteEvent> = BinaryHeap::new();
+
+    let mut sim : Simulation = Simulation {line : millennium_line, train_list : train_list, future_event_list : future_event_list, time_elapsed : 0.0};
+
+    while sim.time_elapsed < SIMULATION_LENGTH {
+        sim.time_elapsed += 1.0;
     }
 
 }
