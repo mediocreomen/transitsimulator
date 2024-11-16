@@ -11,7 +11,7 @@ use rand; // Need for RNG and distributions
 const NUMBER_OF_TRAINS : u8 = 20;
 const TRAIN_CAPACITY : u8 = 100;
 const TRAIN_ASSIST_CAPACITY : u8 = 10;
-const SIMULATION_LENGTH : f32 = 1320.0;
+const SIMULATION_LENGTH : f32 = 10.0;
 
 struct Simulation { // Holds the Line and the list of trains on it
     line : Line,
@@ -20,10 +20,28 @@ struct Simulation { // Holds the Line and the list of trains on it
     future_event_list : BinaryHeap<DiscreteEvent>,
 }
 
+impl Simulation {
+
+    fn pop_event(&mut self) -> DiscreteEvent {
+        // Pop the next event from the event list
+        let new_event = self.future_event_list.pop();
+        match new_event {
+            Some(evnt) => return evnt,
+            None => panic!("FEQ is EMPTY! WERE ALL GONNA DIE!!!"),
+        }
+    }
+
+    fn add_event(&mut self, event_type: EventTypes, time: f32) {
+        // Add an event to the future event list
+        self.future_event_list.push(DiscreteEvent{event : event_type, time: time});
+    }
+}
+
 
 enum EventTypes {
     TrainArrival(usize, usize), // TRAIN ID, STATION ID
     TrainDeparture(usize, usize), // TRAIN ID, NEXT STATION ID
+    Dummy(), // DOES NOTHING
 }
 
 struct DiscreteEvent {
@@ -33,7 +51,7 @@ struct DiscreteEvent {
 
 impl Ord for DiscreteEvent {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.time.total_cmp(&other.time)
+        other.time.total_cmp(&self.time)
     }
 }
 
@@ -133,6 +151,13 @@ impl Customer {
 
 }
 
+
+//// Event Code //// 
+fn dummy_event(mut sim : Simulation) -> Simulation {
+    return sim;
+}
+
+
 fn main() {
     // Main simulation loop
     
@@ -155,11 +180,35 @@ fn main() {
 
     // FEL
     let future_event_list : BinaryHeap<DiscreteEvent> = BinaryHeap::new();
+    let mut new_event : DiscreteEvent;
 
     let mut sim : Simulation = Simulation {line : millennium_line, train_list : train_list, future_event_list : future_event_list, time_elapsed : 0.0};
 
-    while sim.time_elapsed < SIMULATION_LENGTH {
-        sim.time_elapsed += 1.0;
+    // Add first event
+    sim.add_event(EventTypes::Dummy(), 0.0);
+    sim.add_event(EventTypes::Dummy(), 2.1);
+    sim.add_event(EventTypes::Dummy(), 1.1);
+
+    // Event Loop
+    while sim.time_elapsed < SIMULATION_LENGTH && !sim.future_event_list.is_empty()  {
+        
+        // Get next event
+        new_event = sim.pop_event();
+
+        // DO THE THING
+        match new_event.event {
+            EventTypes::Dummy() => sim = dummy_event(sim),
+            EventTypes::TrainArrival(train_id, station_id) => (),
+            EventTypes::TrainDeparture(train_id, station_id) => (),
+        }
+        println!("New Time {}", new_event.time);
+        println!("Events in FEQ {}", sim.future_event_list.len());
+
+        // Set new time
+        sim.time_elapsed = new_event.time
     }
+
+    // Empty FEL
+    sim.future_event_list.clear();
 
 }
