@@ -11,7 +11,11 @@ use rand; // Need for RNG and distributions
 const NUMBER_OF_TRAINS : u8 = 20;
 const TRAIN_CAPACITY : u8 = 100;
 const TRAIN_ASSIST_CAPACITY : u8 = 10;
-const SIMULATION_LENGTH : f32 = 10.0;
+
+const SIMULATION_LENGTH : f32 = 32.0; // NOTE: PRODUCTION LENGTH = 1,320 MINUTES
+
+const EASTWARD : i8 = 1;
+const WESTWARD : i8 = -1;
 
 struct Simulation { // Holds the Line and the list of trains on it
     line : Line,
@@ -106,6 +110,14 @@ impl Line {
         self.stations[station_index].customers.push(new_cust);
     }
 
+    fn length(&self) -> usize {
+        return self.stations.len();
+    }
+
+    fn id_to_name(&self, station_id: usize) -> &String {
+        return &self.stations[station_id].name;
+    }
+
 }
 
 #[derive(Debug)]
@@ -114,20 +126,36 @@ struct Train {
     capacity: u8,
     assist_capacity: u8, // Priority seating
     active: bool, // Wether or not this train is in our system or on standby
-    to_station: u8, // Current station we are at (or are headed to)
+    at_station: usize, // Current station we are at (or are headed to)
     in_motion: bool, // If this train is between stations or not
+    direction: i8,
 }
 
 impl Train {
 
     fn new(new_id : u8) -> Train {
         return Train{id : new_id, capacity : TRAIN_CAPACITY, assist_capacity : TRAIN_ASSIST_CAPACITY, 
-            active : false, to_station : 0, in_motion : false};
+            active : false, at_station : 0, in_motion : false, direction : EASTWARD};
     }
 
-    fn arrive_at(mut self, station_id : u8) {
+    fn arrive_at(&mut self, station_id : usize) {
         self.in_motion = false;
-        self.to_station = station_id;
+        self.at_station = station_id;
+    }
+
+    fn leave_to(&mut self, station_id : usize) {
+        self.in_motion = true;
+        self.at_station = station_id;
+    }
+
+    fn switch_direction(&mut self) {
+        // Switches the direction of the given train
+        if self.direction == EASTWARD {
+            self.direction = WESTWARD;
+        } else {
+            self.direction = EASTWARD;
+        }
+
     }
 
 }
@@ -154,6 +182,37 @@ impl Customer {
 
 //// Event Code //// 
 fn dummy_event(mut sim : Simulation) -> Simulation {
+    return sim;
+}
+
+fn train_arrival(mut sim : Simulation, train_id: usize, station_id: usize) -> Simulation {
+    
+    println!("{} -- Train {} ARRIVAL at {}", sim.time_elapsed, train_id, sim.line.id_to_name(station_id));
+
+    sim.train_list[train_id].arrive_at(station_id);
+    if sim.train_list[train_id].at_station == 0 && sim.train_list[train_id].direction == WESTWARD {
+        sim.train_list[train_id].switch_direction()
+    }
+    else if sim.train_list[train_id].at_station == sim.line.length() - 1 && sim.train_list[train_id].direction == EASTWARD {
+        sim.train_list[train_id].switch_direction()
+    }
+
+    if sim.train_list[train_id].direction == EASTWARD {
+        sim.add_event(EventTypes::TrainDeparture(train_id, station_id + 1), sim.time_elapsed + 0.5);
+    } else { // WESTWARD
+        sim.add_event(EventTypes::TrainDeparture(train_id, station_id - 1), sim.time_elapsed + 0.5);
+    }
+
+    return sim;
+}
+
+fn train_departure(mut sim : Simulation, train_id: usize, station_id: usize) -> Simulation {
+    
+    println!("{} -- Train {} DEPARTURE to {}", sim.time_elapsed, train_id, sim.line.id_to_name(station_id));
+
+    sim.train_list[train_id].leave_to(station_id);
+    sim.add_event(EventTypes::TrainArrival(train_id, station_id), sim.time_elapsed + 1.0);
+    
     return sim;
 }
 
@@ -185,9 +244,7 @@ fn main() {
     let mut sim : Simulation = Simulation {line : millennium_line, train_list : train_list, future_event_list : future_event_list, time_elapsed : 0.0};
 
     // Add first event
-    sim.add_event(EventTypes::Dummy(), 0.0);
-    sim.add_event(EventTypes::Dummy(), 2.1);
-    sim.add_event(EventTypes::Dummy(), 1.1);
+    sim.add_event(EventTypes::TrainArrival(0, 0), 0.0);
 
     // Event Loop
     while sim.time_elapsed < SIMULATION_LENGTH && !sim.future_event_list.is_empty()  {
@@ -195,17 +252,17 @@ fn main() {
         // Get next event
         new_event = sim.pop_event();
 
+        // Set new time
+        sim.time_elapsed = new_event.time;
+
         // DO THE THING
         match new_event.event {
             EventTypes::Dummy() => sim = dummy_event(sim),
-            EventTypes::TrainArrival(train_id, station_id) => (),
-            EventTypes::TrainDeparture(train_id, station_id) => (),
+            EventTypes::TrainArrival(train_id, station_id) => sim = train_arrival(sim, train_id, station_id),
+            EventTypes::TrainDeparture(train_id, station_id) => sim = train_departure(sim, train_id, station_id),
         }
         println!("New Time {}", new_event.time);
         println!("Events in FEQ {}", sim.future_event_list.len());
-
-        // Set new time
-        sim.time_elapsed = new_event.time
     }
 
     // Empty FEL
