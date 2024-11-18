@@ -6,6 +6,7 @@ use std::collections::BinaryHeap;
 use std::vec;
 use std::collections; // Need for BST and Queue
 use rand; // Need for RNG and distributions
+use rand_distr::{Distribution, Exp}; // Gives us Exp and Poisson distributions
 
 //// HYPERPARAMETRS ////
 const NUMBER_OF_TRAINS : u8 = 20;
@@ -23,6 +24,7 @@ struct Simulation { // Holds the Line and the list of trains on it
     time_elapsed : f32,
     future_event_list : BinaryHeap<DiscreteEvent>,
 }
+
 
 impl Simulation {
 
@@ -45,6 +47,7 @@ impl Simulation {
 enum EventTypes {
     TrainArrival(usize, usize), // TRAIN ID, STATION ID
     TrainDeparture(usize, usize), // TRAIN ID, NEXT STATION ID
+    TrainRelease(usize, usize, i8), // TRAIN ID, NEXT STATION ID, TRAVEL DIRECTION
     Dummy(), // DOES NOTHING
 }
 
@@ -216,6 +219,24 @@ fn train_departure(mut sim : Simulation, train_id: usize, station_id: usize) -> 
     return sim;
 }
 
+fn release_train(mut sim : Simulation, train_id: usize, station_id: usize, direction : i8) -> Simulation {
+    // Puts the given train onto the tracks at the given station. If there are more trains, qeues another to be put on the tracks
+    println!("{} -- Train {} RELEASED to {}", sim.time_elapsed, train_id, sim.line.id_to_name(station_id));
+
+    sim.train_list[train_id].active = true;
+    sim.train_list[train_id].direction = direction;
+    sim.train_list[train_id].leave_to(station_id);
+    sim.add_event(EventTypes::TrainArrival(train_id, station_id), sim.time_elapsed + 1.0);
+    
+    // Add next train to queue
+    let exp_dist = Exp::new(2.0).unwrap();
+    if train_id < sim.train_list.len() - 1 { // Only send another train if we have more trains!
+        sim.add_event(EventTypes::TrainRelease(train_id + 1, 0, EASTWARD), sim.time_elapsed + exp_dist.sample(&mut rand::thread_rng()));
+    }
+
+    return sim;
+}
+
 
 fn main() {
     // Main simulation loop
@@ -244,7 +265,7 @@ fn main() {
     let mut sim : Simulation = Simulation {line : millennium_line, train_list : train_list, future_event_list : future_event_list, time_elapsed : 0.0};
 
     // Add first event
-    sim.add_event(EventTypes::TrainArrival(0, 0), 0.0);
+    sim.add_event(EventTypes::TrainRelease(0, 0, EASTWARD), 0.0);
 
     // Event Loop
     while sim.time_elapsed < SIMULATION_LENGTH && !sim.future_event_list.is_empty()  {
@@ -260,6 +281,7 @@ fn main() {
             EventTypes::Dummy() => sim = dummy_event(sim),
             EventTypes::TrainArrival(train_id, station_id) => sim = train_arrival(sim, train_id, station_id),
             EventTypes::TrainDeparture(train_id, station_id) => sim = train_departure(sim, train_id, station_id),
+            EventTypes::TrainRelease(train_id, station_id, dir) => sim = release_train(sim, train_id, station_id, dir),
         }
         println!("New Time {}", new_event.time);
         println!("Events in FEQ {}", sim.future_event_list.len());
