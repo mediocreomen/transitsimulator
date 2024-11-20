@@ -6,13 +6,27 @@ use std::collections::BinaryHeap;
 use std::collections::VecDeque;
 use std::vec;
 use std::collections; // Need for BST and Queue
-use rand; // Need for RNG and distributions
+use rand; 
+use rand::rngs::ThreadRng;
+use rand::SeedableRng;
+use rand_chacha;
+
+
+// Need for RNG and distributions
 use rand_distr::{Distribution, Exp}; // Gives us Exp and Poisson distributions
+
+// Want for optimized RNG algs
+use rand_chacha::ChaCha8Core;
+use rand_chacha::ChaCha8Rng;
 
 //// HYPERPARAMETRS ////
 const NUMBER_OF_TRAINS : u8 = 4;
 const TRAIN_CAPACITY : u8 = 100;
 const TRAIN_ASSIST_CAPACITY : u8 = 10;
+
+const PRINT_TRAIN_INFO : bool = false;
+
+const SEED : u64 = 1;
 
 const SIMULATION_LENGTH : f32 = 10.0; // NOTE: PRODUCTION LENGTH = 1,320 MINUTES
 
@@ -24,6 +38,7 @@ struct Simulation { // Holds the Line and the list of trains on it
     train_list : Vec<Train>,
     time_elapsed : f32,
     future_event_list : BinaryHeap<DiscreteEvent>,
+    customer_iat : ChaCha8Rng,
 }
 
 
@@ -49,6 +64,7 @@ enum EventTypes {
     TrainArrival(usize, usize), // TRAIN ID, STATION ID
     TrainDeparture(usize, usize), // TRAIN ID, NEXT STATION ID
     TrainRelease(i8), // TRAVEL DIRECTION
+    CustomerArrival(usize), // STATION ID
     Dummy(), // DOES NOTHING
 }
 
@@ -211,7 +227,7 @@ fn dummy_event( sim : Simulation) -> Simulation {
 
 fn train_arrival(mut sim : Simulation, train_id: usize, station_id: usize) -> Simulation {
     
-    println!("{} -- Train {} ARRIVAL at {}", sim.time_elapsed, train_id, sim.line.id_to_name(station_id));
+    if PRINT_TRAIN_INFO { println!("{} -- Train {} ARRIVAL at {}", sim.time_elapsed, train_id, sim.line.id_to_name(station_id)); }
 
     // TODO: PUT CUSTOMER DEPARTURE CODE WHERE WHEN THAT EXISTS!!!!
 
@@ -239,7 +255,7 @@ fn train_arrival(mut sim : Simulation, train_id: usize, station_id: usize) -> Si
 
 fn train_departure(mut sim : Simulation, train_id: usize, station_id: usize) -> Simulation {
     
-    println!("{} -- Train {} DEPARTURE to {}", sim.time_elapsed, train_id, sim.line.id_to_name(station_id));
+    if PRINT_TRAIN_INFO {println!("{} -- Train {} DEPARTURE to {}", sim.time_elapsed, train_id, sim.line.id_to_name(station_id)); }
 
     sim.train_list[train_id].leave_to(station_id);
     sim.add_event(EventTypes::TrainArrival(train_id, station_id), sim.time_elapsed + 1.0);
@@ -264,9 +280,9 @@ fn release_train(mut sim : Simulation, direction : i8) -> Simulation {
             sim.train_list[train_id].active = true;
             sim.train_list[train_id].direction = direction;
             sim.add_event(EventTypes::TrainArrival(train_id, 0), sim.time_elapsed + 1.0);
-            println!("{} -- Train {} RELEASED going EAST", sim.time_elapsed, train_id);
+            if PRINT_TRAIN_INFO {println!("{} -- Train {} RELEASED going EAST", sim.time_elapsed, train_id);}
         } else {
-            // println!("{} -- UNABLE TO RELEASE TRAIN EASTWARD!", sim.time_elapsed);
+            if PRINT_TRAIN_INFO {println!("{} -- UNABLE TO RELEASE TRAIN EASTWARD!", sim.time_elapsed);}
         }
     }
 
@@ -282,19 +298,37 @@ fn release_train(mut sim : Simulation, direction : i8) -> Simulation {
             sim.train_list[train_id].active = true;
             sim.train_list[train_id].direction = direction;
             sim.add_event(EventTypes::TrainArrival(train_id, sim.line.length() - 1), sim.time_elapsed + 1.0);
-            println!("{} -- Train {} RELEASED going WEST", sim.time_elapsed, train_id);
+            if PRINT_TRAIN_INFO {println!("{} -- Train {} RELEASED going WEST", sim.time_elapsed, train_id);}
         } else {
-            // println!("{} -- UNABLE TO RELEASE TRAIN WESTWARD!", sim.time_elapsed);
+            if PRINT_TRAIN_INFO {println!("{} -- UNABLE TO RELEASE TRAIN WESTWARD!", sim.time_elapsed);}
         }
     }
     
     // Add next train to queue
-    let exp_dist = Exp::new(2.0).unwrap();
+    let exp_dist = Exp::new(0.5).unwrap();
     if train_id < sim.train_list.len() - 1 { // Only send another train if we have more trains!
         sim.add_event(EventTypes::TrainRelease(direction), sim.time_elapsed + exp_dist.sample(&mut rand::thread_rng()));
     }
 
     return sim;
+}
+
+
+fn customer_arrival(mut sim : Simulation, station_id: usize) -> Simulation {
+    // Has a customer arrive at the given station with a random destination station and 
+    // Adds a new customer arrival event using the given RNG var in the sim object
+
+    // Add new customer to station
+    sim.line.stations[station_id].add_customer(Customer::empty());
+
+    // Query new customer arrival event
+    let iat = rand_distr::Exp::new(2.0).unwrap();
+    let new_iat = iat.sample(&mut sim.customer_iat);
+    sim.add_event(EventTypes::CustomerArrival(station_id), sim.time_elapsed + new_iat);
+
+    println!("{} -- Added customer to station {} with next one to arrive in {} minutes", sim.time_elapsed, sim.line.id_to_name(station_id), new_iat);
+
+    return sim
 }
 
 
@@ -308,10 +342,6 @@ fn main() {
 
     let millennium_line: Line = Line::new(String::from("Millennium Line"), &m_line_station_names);
 
-    for i in 0..millennium_line.stations.len() {
-        println!("{} with {} customer", millennium_line.stations[i].name, millennium_line.stations[i].customers.len());
-    }
-
     // Load Trains
     let mut train_list: Vec<Train> = Vec::new();
     for i in 0..NUMBER_OF_TRAINS {
@@ -321,12 +351,17 @@ fn main() {
     // FEL
     let future_event_list : BinaryHeap<DiscreteEvent> = BinaryHeap::new();
     let mut new_event : DiscreteEvent;
+    
+    // RNG streams (For CRN)
+    let customer_arrival_rng = rand_chacha::ChaCha8Rng::seed_from_u64(SEED);
 
-    let mut sim : Simulation = Simulation {line : millennium_line, train_list : train_list, future_event_list : future_event_list, time_elapsed : 0.0};
+    // Create simulator object
+    let mut sim : Simulation = Simulation {line : millennium_line, train_list : train_list, future_event_list : future_event_list, time_elapsed : 0.0, customer_iat : customer_arrival_rng};
 
     // Add first (few) events
     sim.add_event(EventTypes::TrainRelease(EASTWARD), 0.0);
     sim.add_event(EventTypes::TrainRelease(WESTWARD), 0.0);
+    sim.add_event(EventTypes::CustomerArrival(1), 0.0);
     
     // Add trains to queues equally
     let mut dir: i8 = 1;
@@ -351,6 +386,8 @@ fn main() {
             EventTypes::TrainArrival(train_id, station_id) => sim = train_arrival(sim, train_id, station_id),
             EventTypes::TrainDeparture(train_id, station_id) => sim = train_departure(sim, train_id, station_id),
             EventTypes::TrainRelease(dir) => sim = release_train(sim, dir),
+            EventTypes::CustomerArrival(station_id) => sim = customer_arrival(sim, station_id),
+            _ => sim = dummy_event(sim)
         }
         //println!("New Time {}", new_event.time);
         //println!("Events in FEQ {}", sim.future_event_list.len());
