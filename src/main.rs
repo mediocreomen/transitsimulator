@@ -25,10 +25,12 @@ const TRAIN_CAPACITY : u8 = 100;
 const TRAIN_ASSIST_CAPACITY : u8 = 10;
 
 const PRINT_TRAIN_INFO : bool = false;
+const PRINT_ARRIVAL_INFO : bool = false;
+const PRINT_CUSTOMER_INFO : bool = true;
 
 const SEED : u64 = 1;
 
-const SIMULATION_LENGTH : f32 = 10.0; // NOTE: PRODUCTION LENGTH = 1,320 MINUTES
+const SIMULATION_LENGTH : f32 = 18.0; // NOTE: PRODUCTION LENGTH = 1,320 MINUTES
 
 const EASTWARD : i8 = 1;
 const WESTWARD : i8 = -1;
@@ -163,13 +165,14 @@ struct Train {
     at_station: usize, // Current station we are at (or are headed to)
     in_motion: bool, // If this train is between stations or not
     direction: i8,
+    customer_list: Vec<Customer>,
 }
 
 impl Train {
 
     fn new(new_id : u8) -> Train {
         return Train{id : new_id, capacity : TRAIN_CAPACITY, assist_capacity : TRAIN_ASSIST_CAPACITY, 
-            active : false, at_station : 0, in_motion : false, direction : EASTWARD};
+            active : false, at_station : 0, in_motion : false, direction : EASTWARD, customer_list: Vec::new()};
     }
 
     fn arrive_at(&mut self, station_id : usize) {
@@ -206,8 +209,8 @@ struct Customer {
     tbt: f32, // Time at which we board the train
     tet: f32, // Time at which we left the train
 
-    start_at: u8, // The station this customert arrived at
-    end_at: u8, // The station this customer wants to reach
+    start_at: usize, // The station this customert arrived at
+    end_at: usize, // The station this customer wants to reach
     assist: bool, // Does this customer need priority seating?
 }
 
@@ -230,14 +233,31 @@ fn train_arrival(mut sim : Simulation, train_id: usize, station_id: usize) -> Si
     if PRINT_TRAIN_INFO { println!("{} -- Train {} ARRIVAL at {}", sim.time_elapsed, train_id, sim.line.id_to_name(station_id)); }
 
     // TODO: PUT CUSTOMER DEPARTURE CODE WHERE WHEN THAT EXISTS!!!!
+    // THIS CODE UNBOARDS ALL PASSENGERS CURRENTLY (REGARDLESS OF GOAL STATION)
+    let mut customer_count = 0;
+    let mut customer_index: usize = 0;
+    if sim.train_list[train_id].customer_list.len() > 0 {customer_index = sim.train_list[train_id].customer_list.len();}
 
+    while customer_index > 0 { // NOTE: We work back-to_front to avoid ordering issues with removal
+        sim.train_list[train_id].customer_list.remove(customer_index - 1); // For now just let custromers get freed into the aether
+        customer_index -= 1;
+        customer_count += 1;
+    }
+
+    if customer_count > 0 && PRINT_CUSTOMER_INFO{
+        println!("{} -- Train {} dropped off {} passengers at {}", sim.time_elapsed, train_id, customer_count, sim.line.id_to_name(station_id)); 
+    }
+
+    // Terminal station check
     if sim.train_list[train_id].at_station == 0 && sim.train_list[train_id].direction == WESTWARD {
         sim.train_list[train_id].disable();
+        if PRINT_TRAIN_INFO { println!("{} -- Train {} REACHED TERMINAL STATION (WESTWARD)", sim.time_elapsed, train_id); }
         sim.line.east_trains.push_back(train_id);
         return sim;
     }
     else if sim.train_list[train_id].at_station == sim.line.length() - 1 && sim.train_list[train_id].direction == EASTWARD {
         sim.train_list[train_id].disable();
+        if PRINT_TRAIN_INFO { println!("{} -- Train {} REACHED TERMINAL STATION (WESTWARD)", sim.time_elapsed, train_id); }
         sim.line.west_trains.push_back(train_id);
         return sim;
     }
@@ -256,6 +276,23 @@ fn train_arrival(mut sim : Simulation, train_id: usize, station_id: usize) -> Si
 fn train_departure(mut sim : Simulation, train_id: usize, station_id: usize) -> Simulation {
     
     if PRINT_TRAIN_INFO {println!("{} -- Train {} DEPARTURE to {}", sim.time_elapsed, train_id, sim.line.id_to_name(station_id)); }
+
+    // TODO: Get customers to board train
+    // THIS CURRENT CODE PUTS ALL CUSTOMERS IN STATION ON TRAIN
+    let mut customer_count = 0;
+    let mut customer_index: usize = 0;
+    let train_station = sim.train_list[train_id].at_station;
+    if sim.line.stations[train_station].customers.len() > 0 {customer_index = sim.line.stations[train_station].customers.len();}
+
+    while customer_index > 0 { // NOTE: We work back-to_front to avoid ordering issues with removal
+        sim.train_list[train_id].customer_list.push(sim.line.stations[train_station].customers.remove(customer_index - 1));
+        customer_index -= 1;
+        customer_count += 1;
+    }
+
+    if customer_count > 0 && PRINT_CUSTOMER_INFO {
+        println!("{} -- Train {} picked up {} passengers from {}", sim.time_elapsed, train_id, customer_count, sim.line.id_to_name(train_station)); 
+    }
 
     sim.train_list[train_id].leave_to(station_id);
     sim.add_event(EventTypes::TrainArrival(train_id, station_id), sim.time_elapsed + 1.0);
@@ -279,6 +316,7 @@ fn release_train(mut sim : Simulation, direction : i8) -> Simulation {
             // Put train on first station
             sim.train_list[train_id].active = true;
             sim.train_list[train_id].direction = direction;
+            sim.train_list[train_id].at_station = 0;
             sim.add_event(EventTypes::TrainArrival(train_id, 0), sim.time_elapsed + 1.0);
             if PRINT_TRAIN_INFO {println!("{} -- Train {} RELEASED going EAST", sim.time_elapsed, train_id);}
         } else {
@@ -297,6 +335,7 @@ fn release_train(mut sim : Simulation, direction : i8) -> Simulation {
             // Put train on last station
             sim.train_list[train_id].active = true;
             sim.train_list[train_id].direction = direction;
+            sim.train_list[train_id].at_station = sim.line.length() - 1;
             sim.add_event(EventTypes::TrainArrival(train_id, sim.line.length() - 1), sim.time_elapsed + 1.0);
             if PRINT_TRAIN_INFO {println!("{} -- Train {} RELEASED going WEST", sim.time_elapsed, train_id);}
         } else {
@@ -318,15 +357,20 @@ fn customer_arrival(mut sim : Simulation, station_id: usize) -> Simulation {
     // Has a customer arrive at the given station with a random destination station and 
     // Adds a new customer arrival event using the given RNG var in the sim object
 
-    // Add new customer to station
-    sim.line.stations[station_id].add_customer(Customer::empty());
+    // Add new customer to station TODO: CHANGE BE ANB ACTUAL CUSTOMER
+    let new_customer = Customer {sat : sim.time_elapsed, tbt: 0.0, tet: 0.0, 
+        start_at: station_id, end_at : station_id, assist : false};
+    
+    sim.line.stations[station_id].add_customer(new_customer);
 
     // Query new customer arrival event
     let iat = rand_distr::Exp::new(2.0).unwrap();
     let new_iat = iat.sample(&mut sim.customer_iat);
     sim.add_event(EventTypes::CustomerArrival(station_id), sim.time_elapsed + new_iat);
 
-    println!("{} -- Added customer to station {} with next one to arrive in {} minutes", sim.time_elapsed, sim.line.id_to_name(station_id), new_iat);
+    if PRINT_ARRIVAL_INFO {
+        println!("{} -- Added customer to station {} with next one to arrive in {} minutes", sim.time_elapsed, sim.line.id_to_name(station_id), new_iat);
+    }
 
     return sim
 }
