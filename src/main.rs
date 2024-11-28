@@ -25,8 +25,8 @@ const TRAIN_CAPACITY : u8 = 100;
 const TRAIN_ASSIST_CAPACITY : u8 = 10;
 
 const PRINT_TRAIN_INFO : bool = false;
-const PRINT_ARRIVAL_INFO : bool = false;
-const PRINT_CUSTOMER_INFO : bool = true;
+const PRINT_ARRIVAL_INFO : bool = true;
+const PRINT_CUSTOMER_INFO : bool = false;
 
 const SEED : u64 = 1;
 
@@ -116,20 +116,22 @@ impl Station {
 struct Line { // NOTE: For the sake of this simulator, we assume the line has no braches
     name: String,
     stations: Vec<Station>,
+    inter_station_traveltimes: Vec<f32>,
     east_trains: VecDeque<usize>, // Used to store trains ready to start their journey east
     west_trains: VecDeque<usize>, // Used to store trains ready to start their journey west
 }
 
 impl Line {
 
-    fn new(line_name: String, station_names: &[&str]) -> Line {
+    fn new(line_name: String, station_names: &[&str], station_traveltimes: Vec<f32>) -> Line {
         let mut station_vec = Vec::new();
         for i in 0..station_names.len() {
             station_vec.push(Station::new(String::from(station_names[i])));
         }
+        
         let east_trains: VecDeque<usize> = VecDeque::new();
         let west_trains: VecDeque<usize> = VecDeque::new();
-        return Line {stations: station_vec, name: line_name, east_trains: east_trains, west_trains: west_trains};
+        return Line {stations: station_vec, name: line_name, east_trains: east_trains, west_trains: west_trains, inter_station_traveltimes : station_traveltimes};
     }
 
     fn add_cust_at(&mut self, new_cust: Customer, station_index: usize) {
@@ -294,8 +296,12 @@ fn train_departure(mut sim : Simulation, train_id: usize, station_id: usize) -> 
         println!("{} -- Train {} picked up {} passengers from {}", sim.time_elapsed, train_id, customer_count, sim.line.id_to_name(train_station)); 
     }
 
+    let train_travel_time: f32;
+    if sim.train_list[train_id].direction == EASTWARD {train_travel_time = sim.line.inter_station_traveltimes[sim.train_list[train_id].at_station + 1];}
+    else {train_travel_time = sim.line.inter_station_traveltimes[sim.train_list[train_id].at_station - 1];}
+
     sim.train_list[train_id].leave_to(station_id);
-    sim.add_event(EventTypes::TrainArrival(train_id, station_id), sim.time_elapsed + 1.0);
+    sim.add_event(EventTypes::TrainArrival(train_id, station_id), sim.time_elapsed + train_travel_time);
     
     return sim;
 }
@@ -324,7 +330,7 @@ fn release_train(mut sim : Simulation, direction : i8) -> Simulation {
         }
     }
 
-    else if direction == WESTWARD { // RELEASE ONTO STATION 0
+    else if direction == WESTWARD { // RELEASE ONTO LAST STATION
         let mut is_train = true;
         match sim.line.release_westward() {
             Some(s) => train_id = s,
@@ -343,11 +349,9 @@ fn release_train(mut sim : Simulation, direction : i8) -> Simulation {
         }
     }
     
-    // Add next train to queue
-    let exp_dist = Exp::new(0.5).unwrap();
-    if train_id < sim.train_list.len() - 1 { // Only send another train if we have more trains!
-        sim.add_event(EventTypes::TrainRelease(direction), sim.time_elapsed + exp_dist.sample(&mut rand::thread_rng()));
-    }
+    // Add next train to queue TODO: Make actual arrival stuff
+    let exp_dist = Exp::new(0.25).unwrap();
+    sim.add_event(EventTypes::TrainRelease(direction), sim.time_elapsed + exp_dist.sample(&mut rand::thread_rng()));
 
     return sim;
 }
@@ -358,8 +362,16 @@ fn customer_arrival(mut sim : Simulation, station_id: usize) -> Simulation {
     // Adds a new customer arrival event using the given RNG var in the sim object
 
     // Add new customer to station TODO: CHANGE BE ANB ACTUAL CUSTOMER
+
+    // Generate target station
+    let target_gen = rand::distributions::Uniform::new(0, sim.line.length());
+    let mut target_station = station_id;
+    while station_id == target_station {
+        target_station = target_gen.sample(&mut sim.customer_iat);
+    }
+
     let new_customer = Customer {sat : sim.time_elapsed, tbt: 0.0, tet: 0.0, 
-        start_at: station_id, end_at : station_id, assist : false};
+        start_at: station_id, end_at : target_station, assist : false};
     
     sim.line.stations[station_id].add_customer(new_customer);
 
@@ -369,7 +381,7 @@ fn customer_arrival(mut sim : Simulation, station_id: usize) -> Simulation {
     sim.add_event(EventTypes::CustomerArrival(station_id), sim.time_elapsed + new_iat);
 
     if PRINT_ARRIVAL_INFO {
-        println!("{} -- Added customer to station {} with next one to arrive in {} minutes", sim.time_elapsed, sim.line.id_to_name(station_id), new_iat);
+        println!("{} -- Added customer to station {} (Goal: {})", sim.time_elapsed, sim.line.id_to_name(station_id), sim.line.id_to_name(target_station));
     }
 
     return sim
@@ -383,8 +395,9 @@ fn main() {
     // Create Millenium Line
     let m_line_station_names = ["VCC-Clark", "Commercial–Broadway", "Renfrew", "Rupert", "Gilmore", "Brentwood Town Centre",
                                             "Holdom", "Sperling–Burnaby Lake", "Lake City Way", "Production Way–University", "Lougheed Town Centre"];
+    let m_line_station_traveltimes: Vec<f32> = vec![1.0, 3.0, 1.0, 2.0, 2.0, 2.0, 2.0, 3.0, 2.0, 2.0, 3.0, 5.0, 2.0, 3.0, 2.0, 1.0];
 
-    let millennium_line: Line = Line::new(String::from("Millennium Line"), &m_line_station_names);
+    let millennium_line: Line = Line::new(String::from("Millennium Line"), &m_line_station_names, m_line_station_traveltimes);
 
     // Load Trains
     let mut train_list: Vec<Train> = Vec::new();
