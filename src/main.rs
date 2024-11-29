@@ -20,17 +20,17 @@ use rand_chacha::ChaCha8Core;
 use rand_chacha::ChaCha8Rng;
 
 //// HYPERPARAMETRS ////
-const NUMBER_OF_TRAINS : u8 = 4;
+const NUMBER_OF_TRAINS : u8 = 2;
 const TRAIN_CAPACITY : u8 = 100;
 const TRAIN_ASSIST_CAPACITY : u8 = 10;
 
 const PRINT_TRAIN_INFO : bool = false;
-const PRINT_ARRIVAL_INFO : bool = true;
+const PRINT_ARRIVAL_INFO : bool = false;
 const PRINT_CUSTOMER_INFO : bool = false;
 
 const SEED : u64 = 1;
 
-const SIMULATION_LENGTH : f32 = 18.0; // NOTE: PRODUCTION LENGTH = 1,320 MINUTES
+const SIMULATION_LENGTH : f32 = 1200.0; // NOTE: PRODUCTION LENGTH = 20 HOURS = 1200 MINUTES
 
 const EASTWARD : i8 = 1;
 const WESTWARD : i8 = -1;
@@ -41,6 +41,7 @@ struct Simulation { // Holds the Line and the list of trains on it
     time_elapsed : f32,
     future_event_list : BinaryHeap<DiscreteEvent>,
     customer_iat : ChaCha8Rng,
+    bookkeeping : Bookkeeper,
 }
 
 
@@ -95,16 +96,38 @@ impl PartialEq for DiscreteEvent {
     }
 }
 
+struct Bookkeeper {
+    // Used to track important statistics throughout our simulation
+    total_customers: u32,
+
+}
+
+impl Bookkeeper {
+
+    fn new() -> Bookkeeper {
+        // Returns a BookKeeper class with all stats properly initalized
+        return Bookkeeper {total_customers : 0};
+    }
+
+    fn generate_report(&self) {
+        // Prints a report made out of interal stats to the terminal
+        print!("TOTAL CUSTOMERS: {}\n", self.total_customers);
+    }
+
+}
+
+
 struct Station {
     name: String,
     customers: Vec<Customer>,
+    customer_iat: f32,
 }
 
 impl Station {
 
-    fn new(new_name: String) -> Station {
+    fn new(new_name: String, iat: f32) -> Station {
         let new_vec = Vec::new();
-        return Station {name: new_name, customers: new_vec};
+        return Station {name: new_name, customers: new_vec, customer_iat: iat};
     }
 
     fn add_customer(&mut self, new_cust: Customer) {
@@ -123,10 +146,10 @@ struct Line { // NOTE: For the sake of this simulator, we assume the line has no
 
 impl Line {
 
-    fn new(line_name: String, station_names: &[&str], station_traveltimes: Vec<f32>) -> Line {
+    fn new(line_name: String, station_names: &[&str], station_traveltimes: Vec<f32>, iats : Vec<f32>) -> Line {
         let mut station_vec = Vec::new();
         for i in 0..station_names.len() {
-            station_vec.push(Station::new(String::from(station_names[i])));
+            station_vec.push(Station::new(String::from(station_names[i]), iats[i]));
         }
         
         let east_trains: VecDeque<usize> = VecDeque::new();
@@ -297,7 +320,7 @@ fn train_departure(mut sim : Simulation, train_id: usize, station_id: usize) -> 
     }
 
     let train_travel_time: f32;
-    if sim.train_list[train_id].direction == EASTWARD {train_travel_time = sim.line.inter_station_traveltimes[sim.train_list[train_id].at_station + 1];}
+    if sim.train_list[train_id].direction == EASTWARD {train_travel_time = sim.line.inter_station_traveltimes[sim.train_list[train_id].at_station];}
     else {train_travel_time = sim.line.inter_station_traveltimes[sim.train_list[train_id].at_station - 1];}
 
     sim.train_list[train_id].leave_to(station_id);
@@ -323,7 +346,7 @@ fn release_train(mut sim : Simulation, direction : i8) -> Simulation {
             sim.train_list[train_id].active = true;
             sim.train_list[train_id].direction = direction;
             sim.train_list[train_id].at_station = 0;
-            sim.add_event(EventTypes::TrainArrival(train_id, 0), sim.time_elapsed + 1.0);
+            sim.add_event(EventTypes::TrainArrival(train_id, 0), sim.time_elapsed + 0.5);
             if PRINT_TRAIN_INFO {println!("{} -- Train {} RELEASED going EAST", sim.time_elapsed, train_id);}
         } else {
             if PRINT_TRAIN_INFO {println!("{} -- UNABLE TO RELEASE TRAIN EASTWARD!", sim.time_elapsed);}
@@ -342,7 +365,7 @@ fn release_train(mut sim : Simulation, direction : i8) -> Simulation {
             sim.train_list[train_id].active = true;
             sim.train_list[train_id].direction = direction;
             sim.train_list[train_id].at_station = sim.line.length() - 1;
-            sim.add_event(EventTypes::TrainArrival(train_id, sim.line.length() - 1), sim.time_elapsed + 1.0);
+            sim.add_event(EventTypes::TrainArrival(train_id, sim.line.length() - 1), sim.time_elapsed + 0.5);
             if PRINT_TRAIN_INFO {println!("{} -- Train {} RELEASED going WEST", sim.time_elapsed, train_id);}
         } else {
             if PRINT_TRAIN_INFO {println!("{} -- UNABLE TO RELEASE TRAIN WESTWARD!", sim.time_elapsed);}
@@ -375,8 +398,11 @@ fn customer_arrival(mut sim : Simulation, station_id: usize) -> Simulation {
     
     sim.line.stations[station_id].add_customer(new_customer);
 
+    // Update bookkeeping
+    sim.bookkeeping.total_customers += 1;
+
     // Query new customer arrival event
-    let iat = rand_distr::Exp::new(2.0).unwrap();
+    let iat = rand_distr::Exp::new(sim.line.stations[station_id].customer_iat).unwrap();
     let new_iat = iat.sample(&mut sim.customer_iat);
     sim.add_event(EventTypes::CustomerArrival(station_id), sim.time_elapsed + new_iat);
 
@@ -394,10 +420,12 @@ fn main() {
     // Initalize
     // Create Millenium Line
     let m_line_station_names = ["VCC-Clark", "Commercial–Broadway", "Renfrew", "Rupert", "Gilmore", "Brentwood Town Centre",
-                                            "Holdom", "Sperling–Burnaby Lake", "Lake City Way", "Production Way–University", "Lougheed Town Centre"];
+                                            "Holdom", "Sperling–Burnaby Lake", "Lake City Way", "Production Way–University", "Lougheed Town Centre",
+                                            "Burquitlam", "Moody Centre", "Inlet Centre", "Coquitlam Central", "Lincoln", "Lafarge Lake - Douglas"];
     let m_line_station_traveltimes: Vec<f32> = vec![1.0, 3.0, 1.0, 2.0, 2.0, 2.0, 2.0, 3.0, 2.0, 2.0, 3.0, 5.0, 2.0, 3.0, 2.0, 1.0];
+    let m_line_station_iats = vec![2.325, 15.909, 2.842, 2.05, 2.850, 5.483, 2.225, 1.55, 0.825, 4.125, 9.625, 3.817, 1.933, 1.650, 4.033, 2.925, 1.883];
 
-    let millennium_line: Line = Line::new(String::from("Millennium Line"), &m_line_station_names, m_line_station_traveltimes);
+    let millennium_line: Line = Line::new(String::from("Millennium Line"), &m_line_station_names, m_line_station_traveltimes, m_line_station_iats);
 
     // Load Trains
     let mut train_list: Vec<Train> = Vec::new();
@@ -413,12 +441,17 @@ fn main() {
     let customer_arrival_rng = rand_chacha::ChaCha8Rng::seed_from_u64(SEED);
 
     // Create simulator object
-    let mut sim : Simulation = Simulation {line : millennium_line, train_list : train_list, future_event_list : future_event_list, time_elapsed : 0.0, customer_iat : customer_arrival_rng};
+    let mut sim : Simulation = Simulation {line : millennium_line, train_list : train_list, future_event_list : future_event_list, time_elapsed : 0.0, customer_iat : customer_arrival_rng, bookkeeping : Bookkeeper::new()};
 
-    // Add first (few) events
+    // Add inital events
+    // Train releases
     sim.add_event(EventTypes::TrainRelease(EASTWARD), 0.0);
     sim.add_event(EventTypes::TrainRelease(WESTWARD), 0.0);
-    sim.add_event(EventTypes::CustomerArrival(1), 0.0);
+
+    // CUstomer arrivals
+    for i in 0..sim.line.length() {
+        sim.add_event(EventTypes::CustomerArrival(i), 0.0);
+    }
     
     // Add trains to queues equally
     let mut dir: i8 = 1;
@@ -449,6 +482,9 @@ fn main() {
         //println!("New Time {}", new_event.time);
         //println!("Events in FEQ {}", sim.future_event_list.len());
     }
+
+    // Print report
+    sim.bookkeeping.generate_report();
 
     // Empty FEL
     sim.future_event_list.clear();
