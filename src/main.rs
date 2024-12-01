@@ -20,7 +20,7 @@ use rand_chacha::ChaCha8Core;
 use rand_chacha::ChaCha8Rng;
 
 //// HYPERPARAMETRS ////
-const NUMBER_OF_TRAINS : u8 = 2;
+const NUMBER_OF_TRAINS : u8 = 10;
 const TRAIN_CAPACITY : u8 = 100;
 const TRAIN_ASSIST_CAPACITY : u8 = 10;
 
@@ -98,20 +98,26 @@ impl PartialEq for DiscreteEvent {
 
 struct Bookkeeper {
     // Used to track important statistics throughout our simulation
-    total_customers: u32,
-
+    total_customers: f32,
+    total_station_waiting_time: f32,
+    max_station_waiting_time: f32,
+    max_station_waiting_time_t: f32,
 }
 
 impl Bookkeeper {
 
     fn new() -> Bookkeeper {
         // Returns a BookKeeper class with all stats properly initalized
-        return Bookkeeper {total_customers : 0};
+        return Bookkeeper {total_customers : 0.0, total_station_waiting_time: 0.0, 
+            max_station_waiting_time: 0.0, max_station_waiting_time_t: 0.0};
     }
 
     fn generate_report(&self) {
         // Prints a report made out of interal stats to the terminal
         print!("TOTAL CUSTOMERS: {}\n", self.total_customers);
+        print!("AVERAGE WAIT TIME: {}\n", self.total_station_waiting_time / self.total_customers);
+        print!("MAXIMUM WAIT TIME: {} @ minute {}\n", self.max_station_waiting_time, self.max_station_waiting_time_t);
+        print!("AVERAGE WAIT TIME: {}\n", self.total_station_waiting_time / self.total_customers);
     }
 
 }
@@ -226,6 +232,11 @@ impl Train {
         self.active = false;
     }
 
+    fn has_capacity(&self) -> bool {
+        // Returns true if we have room left for passengers, false if we don't
+        return usize::from(self.capacity) > self.customer_list.len();
+    }
+
 }
 
 #[derive(Debug)]
@@ -243,6 +254,15 @@ impl Customer {
 
     fn empty() -> Customer { // Used for testing
         return Customer {sat: 0.0, tbt: 0.0, tet: 0.0, start_at: 0, end_at: 0, assist: false};
+    }
+
+    fn get_direction(&self) -> i8 {
+        // Returns the direction this customer wants to go in (EASTWARD || WESTWARD)
+        if self.start_at < self.end_at {
+            return WESTWARD;
+        } else {
+            return EASTWARD;
+        }
     }
 
 }
@@ -303,20 +323,43 @@ fn train_departure(mut sim : Simulation, train_id: usize, station_id: usize) -> 
     if PRINT_TRAIN_INFO {println!("{} -- Train {} DEPARTURE to {}", sim.time_elapsed, train_id, sim.line.id_to_name(station_id)); }
 
     // TODO: Get customers to board train
-    // THIS CURRENT CODE PUTS ALL CUSTOMERS IN STATION ON TRAIN
     let mut customer_count = 0;
     let mut customer_index: usize = 0;
+    let mut customers_missed = 0;
     let train_station = sim.train_list[train_id].at_station;
     if sim.line.stations[train_station].customers.len() > 0 {customer_index = sim.line.stations[train_station].customers.len();}
 
-    while customer_index > 0 { // NOTE: We work back-to_front to avoid ordering issues with removal
-        sim.train_list[train_id].customer_list.push(sim.line.stations[train_station].customers.remove(customer_index - 1));
+    let mut boarding_customer: Customer;
+
+    while customer_index > 0 && sim.train_list[train_id].has_capacity() { // NOTE: We work back-to_front to avoid ordering issues with removal
+
+        if sim.line.stations[train_station].customers[customer_index - 1].get_direction() != sim.train_list[train_id].direction {
+            // Skip customer if they aren't going in the right direction for this train
+            customers_missed += 1;
+            customer_index -= 1;
+            continue;
+        }
+
+        boarding_customer = sim.line.stations[train_station].customers.remove(customer_index - 1);
+        boarding_customer.tbt = sim.time_elapsed;
+
+        sim.bookkeeping.total_station_waiting_time += boarding_customer.tbt - boarding_customer.sat; // Total waiting time
+        if boarding_customer.tbt - boarding_customer.sat > sim.bookkeeping.max_station_waiting_time { // Max wait time check
+            sim.bookkeeping.max_station_waiting_time = boarding_customer.tbt - boarding_customer.sat;
+            sim.bookkeeping.max_station_waiting_time_t = sim.time_elapsed;
+        }
+
+        sim.train_list[train_id].customer_list.push(boarding_customer);
+
         customer_index -= 1;
         customer_count += 1;
     }
 
     if customer_count > 0 && PRINT_CUSTOMER_INFO {
         println!("{} -- Train {} picked up {} passengers from {}", sim.time_elapsed, train_id, customer_count, sim.line.id_to_name(train_station)); 
+    }
+    if customers_missed > 0 && PRINT_CUSTOMER_INFO {
+        println!("{} -- Train {} missed {} passengers from {}", sim.time_elapsed, train_id, customers_missed, sim.line.id_to_name(train_station)); 
     }
 
     let train_travel_time: f32;
@@ -372,9 +415,10 @@ fn release_train(mut sim : Simulation, direction : i8) -> Simulation {
         }
     }
     
-    // Add next train to queue TODO: Make actual arrival stuff
-    let exp_dist = Exp::new(0.25).unwrap();
-    sim.add_event(EventTypes::TrainRelease(direction), sim.time_elapsed + exp_dist.sample(&mut rand::thread_rng()));
+    // CONSTANT ARRIVAL
+    if true {
+        sim.add_event(EventTypes::TrainRelease(direction), sim.time_elapsed + 6.0);
+    }
 
     return sim;
 }
@@ -399,7 +443,7 @@ fn customer_arrival(mut sim : Simulation, station_id: usize) -> Simulation {
     sim.line.stations[station_id].add_customer(new_customer);
 
     // Update bookkeeping
-    sim.bookkeeping.total_customers += 1;
+    sim.bookkeeping.total_customers += 1.0;
 
     // Query new customer arrival event
     let iat = rand_distr::Exp::new(sim.line.stations[station_id].customer_iat).unwrap();
