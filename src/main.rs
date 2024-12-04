@@ -10,6 +10,7 @@ use rand;
 use rand::rngs::ThreadRng;
 use rand::SeedableRng;
 use rand_chacha;
+use std::env;
 
 
 // Need for RNG and distributions
@@ -37,6 +38,14 @@ const SIMULATION_LENGTH : f32 = 1200.0; // NOTE: PRODUCTION LENGTH = 20 HOURS = 
 const EASTWARD : i8 = 1;
 const WESTWARD : i8 = -1;
 
+enum DispatchTypes {
+    Constant(f32), // Release one train every lambda minutes
+    TrainDeparture(usize, usize), // TRAIN ID, NEXT STATION ID
+    TrainRelease(i8), // TRAVEL DIRECTION
+    CustomerArrival(usize), // STATION ID
+    Dummy(), // DOES NOTHING
+}
+
 struct Simulation { // Holds the Line and the list of trains on it
     line : Line,
     train_list : Vec<Train>,
@@ -44,6 +53,7 @@ struct Simulation { // Holds the Line and the list of trains on it
     future_event_list : BinaryHeap<DiscreteEvent>,
     customer_iat : ChaCha8Rng,
     bookkeeping : Bookkeeper,
+    dispatch_type : DispatchTypes,
 }
 
 
@@ -483,8 +493,14 @@ fn release_train(mut sim : Simulation, direction : i8) -> Simulation {
     }
     
     // CONSTANT ARRIVAL
-    if true {
+    if false {
         sim.add_event(EventTypes::TrainRelease(direction), sim.time_elapsed + 6.0);
+    }
+
+    // Arrival types
+    match sim.dispatch_type {
+        DispatchTypes::Constant(lambda) => sim.add_event(EventTypes::TrainRelease(direction), sim.time_elapsed + lambda),
+        _ => println!("Error: Somehow a dispatch type has not been defined..."),
     }
 
     return sim;
@@ -524,6 +540,46 @@ fn customer_arrival(mut sim : Simulation, station_id: usize) -> Simulation {
 
 fn main() {
     // Main simulation loop
+
+
+    // Get command line arguements
+    let args: Vec<String> = env::args().collect();
+    if args.len() < 3 {
+        println!("ERROR: Please provide the following arguements\n<seed> <constant|timebased|popbased> <parameter>");
+        return
+    }
+
+    let seed : u64 = args[1].parse().unwrap();
+
+    let dispatch_type : DispatchTypes;
+    let parameter : f32;
+    if args.len() == 3 {
+        // Default parameters
+        parameter = match args[2].to_lowercase().as_str() {
+            "constant" => 6.0, // How many times a second (default is six seconds)
+            "timebased" => 0.0, // Offset added to time function (default is none)
+            "popbased" => 1.0, // Multiplier to population function (default is none)
+            _ => 0.0,
+        };
+        println!("Useing default parameter: {}", parameter);
+        
+    } else {
+        parameter = args[3].parse().unwrap();
+    }
+
+    if args[2].to_lowercase() == "constant" {
+        dispatch_type = DispatchTypes::Constant(parameter);
+    } else if args[2].to_lowercase() == "timebased" {
+        dispatch_type = DispatchTypes::Constant(parameter);
+    } else if args[2].to_lowercase() == "popbased" {
+        dispatch_type = DispatchTypes::Constant(parameter);
+    } else {
+        println!("INVALID DISPATCH METHOD, USE ONE OF THE FOLLOWING: <constant|timebased|popbased>");
+        return
+    }
+
+
+
     
     // Initalize
     // Create Millenium Line
@@ -546,10 +602,11 @@ fn main() {
     let mut new_event : DiscreteEvent;
     
     // RNG streams (For CRN)
-    let customer_arrival_rng = rand_chacha::ChaCha8Rng::seed_from_u64(SEED);
+    let customer_arrival_rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
 
     // Create simulator object
-    let mut sim : Simulation = Simulation {line : millennium_line, train_list : train_list, future_event_list : future_event_list, time_elapsed : 0.0, customer_iat : customer_arrival_rng, bookkeeping : Bookkeeper::new()};
+    let mut sim : Simulation = Simulation {line : millennium_line, train_list : train_list, future_event_list : future_event_list, 
+        time_elapsed : 0.0, customer_iat : customer_arrival_rng, bookkeeping : Bookkeeper::new(), dispatch_type: dispatch_type};
 
     // Add inital events
     // Train releases
