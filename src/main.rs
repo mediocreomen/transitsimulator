@@ -97,6 +97,7 @@ enum EventTypes {
     TrainDeparture(usize, usize), // TRAIN ID, NEXT STATION ID
     TrainRelease(i8), // TRAVEL DIRECTION
     CustomerArrival(usize), // STATION ID
+    PollStats(), // Polls for customers waiting and other stats, should be called every minute on the minute
     Dummy(), // DOES NOTHING
 }
 
@@ -137,6 +138,11 @@ struct Bookkeeper {
     average_train_util_percent: f32,
     max_train_util_percent: f32,
     time_train_full_percent: f32,
+    currently_waiting_customers: f32,
+    average_customers_waiting: f32,
+    max_customers_waiting: f32,
+    max_customers_waiting_t: f32,
+    average_trains_deployed : f32,
 }
 
 impl Bookkeeper {
@@ -146,7 +152,9 @@ impl Bookkeeper {
         return Bookkeeper {total_customers : 0.0, total_customers_boarded: 0.0, 
             total_customers_departed: 0.0, total_station_waiting_time: 0.0, 
             max_station_waiting_time: 0.0, max_station_waiting_time_t: 0.0, average_train_util_percent: 0.0, 
-            total_trains : 0.0, max_train_util_percent: 0.0, time_train_full_percent: 0.0};
+            total_trains : 0.0, max_train_util_percent: 0.0, time_train_full_percent: 0.0,
+            currently_waiting_customers : 0.0, average_customers_waiting: 0.0, max_customers_waiting : 0.0, 
+            max_customers_waiting_t : 0.0, average_trains_deployed : 0.0};
     }
 
     fn generate_report(&self, title : String) {
@@ -154,16 +162,17 @@ impl Bookkeeper {
         println!("{}\n", title);
         println!("Customers:");
         print!("    TOTAL CUSTOMERS BOARDED / DEPARTED / GENERATED: {} / {} / {}\n", self.total_customers_boarded, self.total_customers_departed, self.total_customers);
-        print!("    AVERAGE WAIT TIME: {}\n", self.total_station_waiting_time / self.total_customers_boarded);
-        print!("    MAXIMUM WAIT TIME: {} @ minute {}\n", self.max_station_waiting_time, self.max_station_waiting_time_t);
-        
-        println!("\nService Rate:");
-        print!("  THROUGHPUT (customers/hour): {}\n", self.total_customers_departed / 20.0); // Customers per hour
+        print!("    AVERAGE WAIT TIME: {:.1}\n", self.total_station_waiting_time / self.total_customers_boarded);
+        print!("    MAXIMUM WAIT TIME: {:.1} @ minute {}\n", self.max_station_waiting_time, self.max_station_waiting_time_t);
+        print!("    AVERAGE CUSTOMERS WAITING: {:.1}\n", self.average_customers_waiting);
+        print!("    MAXIMUM CUSTOMERS WAITING: {:.1} @ minute {}\n", self.max_customers_waiting, self.max_customers_waiting_t);
+        print!("    AVERAGE THROUGHPUT (customers/hour): {:.1}\n", self.total_customers_departed / 20.0); // Customers per hour
 
         println!("\nTrain Usage:");
-        print!("    AVERAGE TRAIN UTILIZATION: {}\n", self.average_train_util_percent);
-        print!("    MAXIMUM TRAIN UTILIZATION: {}\n", self.max_train_util_percent);
-        print!("    AVERAGE TIME TRAINS ARE FULL FOR: {}\n", self.time_train_full_percent);
+        print!("    AVERAGE PERCENT OF TRAINS DEPLOYED (total={}): {:.2}%\n", NUMBER_OF_TRAINS, self.average_trains_deployed);
+        print!("    AVERAGE TRAIN UTILIZATION: {:.2}%\n", self.average_train_util_percent);
+        print!("    MAXIMUM TRAIN UTILIZATION: {:.2}%\n", self.max_train_util_percent);
+        print!("    PERCENT OF TIME TRAINS ARE FULL FOR: {:.2}%\n", self.time_train_full_percent);
     }
 
 }
@@ -217,6 +226,7 @@ struct Line { // NOTE: For the sake of this simulator, we assume the line has no
     inter_station_traveltimes: Vec<f32>,
     east_trains: VecDeque<usize>, // Used to store trains ready to start their journey east
     west_trains: VecDeque<usize>, // Used to store trains ready to start their journey west
+    trains_deployed: f32,
 }
 
 impl Line {
@@ -229,7 +239,8 @@ impl Line {
         
         let east_trains: VecDeque<usize> = VecDeque::new();
         let west_trains: VecDeque<usize> = VecDeque::new();
-        return Line {stations: station_vec, name: line_name, east_trains: east_trains, west_trains: west_trains, inter_station_traveltimes : station_traveltimes};
+        return Line {stations: station_vec, name: line_name, east_trains: east_trains, west_trains: west_trains, 
+            inter_station_traveltimes : station_traveltimes, trains_deployed : 0.0};
     }
 
     fn add_cust_at(&mut self, new_cust: Customer, station_index: usize) {
@@ -246,11 +257,13 @@ impl Line {
     
     fn release_westward(&mut self) -> Option<usize> {
         // Take the next train index out of the westward train queue and return it
+        self.trains_deployed += 1.0;
         return self.west_trains.pop_front();
     }
 
     fn release_eastward(&mut self) -> Option<usize> {
         // Take the next train index out of the eastward train queue and return it
+        self.trains_deployed += 1.0;
         return self.east_trains.pop_front();
     }
 
@@ -360,6 +373,25 @@ impl Customer {
 
 //// Event Code //// 
 fn dummy_event( sim : Simulation) -> Simulation {
+    // Does nothing, used as a backup/to end the simulation
+    return sim;
+}
+
+fn poll_stats( mut sim : Simulation) -> Simulation {
+    // Updates the bookkeeping of the sim with some handy info such as the number of customers waiting
+    // Does this once every minute
+
+    // Customers waiting
+    sim.bookkeeping.average_customers_waiting += sim.bookkeeping.currently_waiting_customers / SIMULATION_LENGTH;
+    if sim.bookkeeping.max_customers_waiting < sim.bookkeeping.currently_waiting_customers {
+        sim.bookkeeping.max_customers_waiting = sim.bookkeeping.currently_waiting_customers;
+        sim.bookkeeping.max_customers_waiting_t = sim.time_elapsed;
+    }
+
+    // Trains deployed
+    sim.bookkeeping.average_trains_deployed += sim.line.trains_deployed / SIMULATION_LENGTH;
+
+    sim.add_event(EventTypes::PollStats(), sim.time_elapsed + 1.0);
     return sim;
 }
 
@@ -393,12 +425,14 @@ fn train_arrival(mut sim : Simulation, train_id: usize, station_id: usize) -> Si
     if sim.train_list[train_id].at_station == 0 && sim.train_list[train_id].direction == WESTWARD {
         sim.train_list[train_id].disable();
         if PRINT_TRAIN_INFO { println!("{} -- Train {} REACHED TERMINAL STATION (WESTWARD)", sim.time_elapsed, train_id); }
+        sim.line.trains_deployed -= 1.0;
         sim.line.east_trains.push_back(train_id);
         return sim;
     }
     else if sim.train_list[train_id].at_station == sim.line.length() - 1 && sim.train_list[train_id].direction == EASTWARD {
         sim.train_list[train_id].disable();
         if PRINT_TRAIN_INFO { println!("{} -- Train {} REACHED TERMINAL STATION (WESTWARD)", sim.time_elapsed, train_id); }
+        sim.line.trains_deployed -= 1.0;
         sim.line.west_trains.push_back(train_id);
         return sim;
     }
@@ -418,7 +452,7 @@ fn train_departure(mut sim : Simulation, train_id: usize, station_id: usize) -> 
     
     if PRINT_TRAIN_INFO {println!("{} -- Train {} DEPARTURE to {}", sim.time_elapsed, train_id, sim.line.id_to_name(station_id)); }
 
-    // TODO: Get customers to board train
+    // Get customers to board train
     let mut customer_count = 0;
     let customers_missed;
     let train_station = sim.train_list[train_id].at_station;
@@ -440,12 +474,13 @@ fn train_departure(mut sim : Simulation, train_id: usize, station_id: usize) -> 
             }
             
             sim.bookkeeping.total_customers_boarded += 1.0; // Amount of customers boarded
+            sim.bookkeeping.currently_waiting_customers -= 1.0;  // One less waiting
 
             sim.train_list[train_id].riding_customers += 1.0;
             sim.train_list[train_id].customer_list.push(boarding_customer);
             customer_count += 1;
         }
-    } else {
+    } else { // WESTWARD
         customers_missed = sim.line.stations[train_station].east_customers.len();
 
         while !sim.line.stations[train_station].west_customers.is_empty() && sim.train_list[train_id].has_capacity() {
@@ -459,6 +494,7 @@ fn train_departure(mut sim : Simulation, train_id: usize, station_id: usize) -> 
             }
             
             sim.bookkeeping.total_customers_boarded += 1.0; // Amount of customer sboarded
+            sim.bookkeeping.currently_waiting_customers -= 1.0; // One less waiting
 
             sim.train_list[train_id].riding_customers += 1.0;
             sim.train_list[train_id].customer_list.push(boarding_customer);
@@ -560,6 +596,7 @@ fn customer_arrival(mut sim : Simulation, station_id: usize) -> Simulation {
 
     // Update bookkeeping
     sim.bookkeeping.total_customers += 1.0;
+    sim.bookkeeping.currently_waiting_customers += 1.0;
 
     // Query new customer arrival event
     let iat = rand_distr::Exp::new(sim.line.stations[station_id].get_true_iat(sim.time_elapsed)).unwrap();
@@ -651,7 +688,7 @@ fn main() {
     // Train releases
     sim.add_event(EventTypes::TrainRelease(EASTWARD), 0.0);
     sim.add_event(EventTypes::TrainRelease(WESTWARD), 0.0);
-    sim.add_event(EventTypes::Dummy(), SIMULATION_LENGTH);
+    sim.add_event(EventTypes::PollStats(), 0.0);
 
     // CUstomer arrivals
     for i in 0..sim.line.length() {
@@ -681,11 +718,11 @@ fn main() {
         // DO THE THING
         match new_event.event {
             EventTypes::Dummy() => sim = dummy_event(sim),
+            EventTypes::PollStats() => sim = poll_stats(sim),
             EventTypes::TrainArrival(train_id, station_id) => sim = train_arrival(sim, train_id, station_id),
             EventTypes::TrainDeparture(train_id, station_id) => sim = train_departure(sim, train_id, station_id),
             EventTypes::TrainRelease(dir) => sim = release_train(sim, dir),
-            EventTypes::CustomerArrival(station_id) => sim = customer_arrival(sim, station_id),
-            _ => sim = dummy_event(sim)
+            EventTypes::CustomerArrival(station_id) => sim = customer_arrival(sim, station_id)
         }
     }
 
