@@ -10,7 +10,9 @@ use rand;
 use rand::rngs::ThreadRng;
 use rand::SeedableRng;
 use rand_chacha;
+use rand_distr::num_traits::clamp;
 use std::env;
+use std::time;
 
 
 // Need for RNG and distributions
@@ -22,28 +24,30 @@ use rand_chacha::ChaCha8Rng;
 
 //// HYPERPARAMETRS ////
 const NUMBER_OF_TRAINS : u8 = 50;
-const TRAIN_CAPACITY : f32 = 300.0;
+const TRAIN_CAPACITY : f32 = 332.0; // Lowest capcity train (ICTS Mark I w/ four cars)
 const TRAIN_ASSIST_CAPACITY : u8 = 10;
 const TRAIN_STOP_TIME : f32 = 0.05;
 const FIRST_CUSTOMER_ARRIVALS_AT : f32 = 10.0;
 
-const PRINT_TRAIN_INFO : bool = true;
+// USed to control what debug messages are printed during the simulation
+// NOTE: All of these slow down the simulation when toggled on and clutter the terminal
+const PRINT_TRAIN_INFO : bool = false;
 const PRINT_ARRIVAL_INFO : bool = false;
-const PRINT_CUSTOMER_INFO : bool = true;
+const PRINT_CUSTOMER_INFO : bool = false;
 
-const SEED : u64 = 1;
+const PRINT_FULL_TIMES : bool = false; // Does not slow down sim considerably
 
 const SIMULATION_LENGTH : f32 = 1200.0; // NOTE: PRODUCTION LENGTH = 20 HOURS = 1200 MINUTES
 
+// Used by trains for direction
 const EASTWARD : i8 = 1;
 const WESTWARD : i8 = -1;
 
 enum DispatchTypes {
     Constant(f32), // Release one train every lambda minutes
-    TrainDeparture(usize, usize), // TRAIN ID, NEXT STATION ID
-    TrainRelease(i8), // TRAVEL DIRECTION
-    CustomerArrival(usize), // STATION ID
-    Dummy(), // DOES NOTHING
+    TimeBased(f32), // Release trains based on the time graph, offset by lambda
+    PopBased(f32), // Release trains based on the waiting population, scaled by lambda
+    TransLink(), // Use translink's system
 }
 
 struct Simulation { // Holds the Line and the list of trains on it
@@ -54,6 +58,7 @@ struct Simulation { // Holds the Line and the list of trains on it
     customer_iat : ChaCha8Rng,
     bookkeeping : Bookkeeper,
     dispatch_type : DispatchTypes,
+    translink_sampler : Vec<f32>,
 }
 
 
@@ -71,6 +76,18 @@ impl Simulation {
     fn add_event(&mut self, event_type: EventTypes, time: f32) {
         // Add an event to the future event list
         self.future_event_list.push(DiscreteEvent{event : event_type, time: time});
+    }
+
+    fn translink_time_sampler(&self) -> f32 {
+        // Given a time, what should the rate that we send out trains be
+        // Based on translink's own stats: https://www.translink.ca/schedules-and-maps/skytrain
+    
+        // Make sure to clamp time to simulation time
+        let mins_2_hours = clamp(self.time_elapsed, 0.0, SIMULATION_LENGTH) / 60.0;
+        let bottom_hour : usize = mins_2_hours.floor() as usize;
+    
+        // Note: No linear interpolation is used. Customers want easy to understand iats and decimals are not that.
+        return self.translink_sampler[bottom_hour];
     }
 }
 
@@ -118,6 +135,8 @@ struct Bookkeeper {
     max_station_waiting_time_t: f32,
     total_trains: f32,
     average_train_util_percent: f32,
+    max_train_util_percent: f32,
+    time_train_full_percent: f32,
 }
 
 impl Bookkeeper {
@@ -127,21 +146,27 @@ impl Bookkeeper {
         return Bookkeeper {total_customers : 0.0, total_customers_boarded: 0.0, 
             total_customers_departed: 0.0, total_station_waiting_time: 0.0, 
             max_station_waiting_time: 0.0, max_station_waiting_time_t: 0.0, average_train_util_percent: 0.0, 
-            total_trains : 0.0};
+            total_trains : 0.0, max_train_util_percent: 0.0, time_train_full_percent: 0.0};
     }
 
-    fn generate_report(&self) {
+    fn generate_report(&self, title : String) {
         // Prints a report made out of interal stats to the terminal
-        print!("TOTAL CUSTOMERS: {}\n", self.total_customers);
-        print!("AVERAGE WAIT TIME: {}\n", self.total_station_waiting_time / self.total_customers_boarded);
-        print!("MAXIMUM WAIT TIME: {} @ minute {}\n", self.max_station_waiting_time, self.max_station_waiting_time_t);
-        print!("TOTAL CUSTOMERS BOARDED / DEPARTED / GENERATED: {} / {} / {}\n", self.total_customers_boarded, self.total_customers_departed, self.total_customers);
+        println!("{}\n", title);
+        println!("Customers:");
+        print!("    TOTAL CUSTOMERS BOARDED / DEPARTED / GENERATED: {} / {} / {}\n", self.total_customers_boarded, self.total_customers_departed, self.total_customers);
+        print!("    AVERAGE WAIT TIME: {}\n", self.total_station_waiting_time / self.total_customers_boarded);
+        print!("    MAXIMUM WAIT TIME: {} @ minute {}\n", self.max_station_waiting_time, self.max_station_waiting_time_t);
+        
+        println!("\nService Rate:");
+        print!("  THROUGHPUT (customers/hour): {}\n", self.total_customers_departed / 20.0); // Customers per hour
 
-        print!("\nAVERAGE TRAIN UTILIZATION: {}\n", self.average_train_util_percent);
+        println!("\nTrain Usage:");
+        print!("    AVERAGE TRAIN UTILIZATION: {}\n", self.average_train_util_percent);
+        print!("    MAXIMUM TRAIN UTILIZATION: {}\n", self.max_train_util_percent);
+        print!("    AVERAGE TIME TRAINS ARE FULL FOR: {}\n", self.time_train_full_percent);
     }
 
 }
-
 
 struct Station {
     name: String,
@@ -170,7 +195,7 @@ impl Station {
         // Returns an actual iat given our current minute
 
         // Table of the per-hour multiplier to iat of each station
-        let hour_periods = vec![0.1, 0.3, 0.7, 0.8, 1.1, 1.5, 1.1, 0.8, 0.7, 0.85, 1.2, 1.35, 1.6, 1.35, 1.1, 0.9, 0.7, 0.5, 0.3, 0.1, 0.0];
+        let hour_periods = vec![0.1, 0.3, 0.7, 0.8, 1.25, 1.5, 1.25, 1.0, 0.9, 1.0, 1.2, 1.4, 1.75, 1.4, 1.1, 0.9, 0.7, 0.5, 0.3, 0.1, 0.0];
         //let hour_periods = vec![1.0; 21];
         
         let mins_2_hours = time / 60.0;
@@ -242,7 +267,9 @@ struct Train {
     customer_list: Vec<Customer>,
     riding_customers: f32,
     percent_full_total: f32,
+    percent_full_max: f32,
     percent_full_test_amount: f32,
+    times_full : f32,
 }
 
 impl Train {
@@ -250,7 +277,7 @@ impl Train {
     fn new(new_id : u8) -> Train {
         return Train{id : new_id, capacity : TRAIN_CAPACITY, 
             active : false, at_station : 0, in_motion : false, direction : EASTWARD, customer_list: Vec::new(),
-            percent_full_total: 0.0, percent_full_test_amount: 0.0, riding_customers: 0.0};
+            percent_full_total: 0.0, percent_full_test_amount: 0.0, riding_customers: 0.0, percent_full_max : 0.0, times_full: 0.0};
     }
 
     fn arrive_at(&mut self, station_id : usize) {
@@ -284,10 +311,20 @@ impl Train {
         return self.capacity > self.riding_customers;
     }
 
-    fn poll_usage(&mut self){
+    fn poll_usage(&mut self) -> bool{
         // Returns true if we have room left for passengers, false if we don't
-        self.percent_full_total += self.riding_customers / self.capacity;
+        let cur_cap_percent = self.riding_customers / self.capacity;
+        self.percent_full_total += cur_cap_percent;
         self.percent_full_test_amount += 1.0;
+        if cur_cap_percent > self.percent_full_max {
+            self.percent_full_max = cur_cap_percent;
+        }
+        if cur_cap_percent > 0.99 {
+            self.times_full += 1.0;
+            return true;
+        } else {
+            return false;
+        }
     }
 
 }
@@ -341,7 +378,6 @@ fn train_arrival(mut sim : Simulation, train_id: usize, station_id: usize) -> Si
         // Remove any thing into
         if sim.train_list[train_id].customer_list[customer_index - 1].end_at == station_id {
             sim.train_list[train_id].customer_list.remove(customer_index - 1);
-
             sim.train_list[train_id].riding_customers -= 1.0;
             customer_count += 1;
             sim.bookkeeping.total_customers_departed += 1.0;
@@ -349,7 +385,7 @@ fn train_arrival(mut sim : Simulation, train_id: usize, station_id: usize) -> Si
         customer_index -= 1;
     }
 
-    if customer_count > 0 && PRINT_CUSTOMER_INFO{
+    if customer_count > 0 && PRINT_CUSTOMER_INFO {
         println!("{} -- Train {} dropped off {} passengers at {}", sim.time_elapsed, train_id, customer_count, sim.line.id_to_name(station_id)); 
     }
 
@@ -403,7 +439,7 @@ fn train_departure(mut sim : Simulation, train_id: usize, station_id: usize) -> 
                 sim.bookkeeping.max_station_waiting_time_t = sim.time_elapsed;
             }
             
-            sim.bookkeeping.total_customers_boarded += 1.0; // Amount of customer sboarded
+            sim.bookkeeping.total_customers_boarded += 1.0; // Amount of customers boarded
 
             sim.train_list[train_id].riding_customers += 1.0;
             sim.train_list[train_id].customer_list.push(boarding_customer);
@@ -441,7 +477,10 @@ fn train_departure(mut sim : Simulation, train_id: usize, station_id: usize) -> 
     if sim.train_list[train_id].direction == EASTWARD {train_travel_time = sim.line.inter_station_traveltimes[sim.train_list[train_id].at_station];}
     else {train_travel_time = sim.line.inter_station_traveltimes[sim.train_list[train_id].at_station - 1];}
 
-    sim.train_list[train_id].poll_usage();
+    let is_full = sim.train_list[train_id].poll_usage();
+    if is_full && PRINT_FULL_TIMES {
+        println!("-- Train {} is full at time {}! --", train_id, sim.time_elapsed)
+    }
 
     sim.train_list[train_id].leave_to(station_id);
     sim.add_event(EventTypes::TrainArrival(train_id, station_id), sim.time_elapsed + train_travel_time);
@@ -491,15 +530,11 @@ fn release_train(mut sim : Simulation, direction : i8) -> Simulation {
             if PRINT_TRAIN_INFO {println!("{} -- UNABLE TO RELEASE TRAIN WESTWARD!", sim.time_elapsed);}
         }
     }
-    
-    // CONSTANT ARRIVAL
-    if false {
-        sim.add_event(EventTypes::TrainRelease(direction), sim.time_elapsed + 6.0);
-    }
 
     // Arrival types
     match sim.dispatch_type {
         DispatchTypes::Constant(lambda) => sim.add_event(EventTypes::TrainRelease(direction), sim.time_elapsed + lambda),
+        DispatchTypes::TransLink() => sim.add_event(EventTypes::TrainRelease(direction), sim.time_elapsed + sim.translink_time_sampler()),
         _ => println!("Error: Somehow a dispatch type has not been defined..."),
     }
 
@@ -545,7 +580,7 @@ fn main() {
     // Get command line arguements
     let args: Vec<String> = env::args().collect();
     if args.len() < 3 {
-        println!("ERROR: Please provide the following arguements\n<seed> <constant|timebased|popbased> <parameter>");
+        println!("ERROR: Please provide the following arguements\n<seed> <constant|timebased|popbased|translink> <parameter>");
         return
     }
 
@@ -570,17 +605,16 @@ fn main() {
     if args[2].to_lowercase() == "constant" {
         dispatch_type = DispatchTypes::Constant(parameter);
     } else if args[2].to_lowercase() == "timebased" {
-        dispatch_type = DispatchTypes::Constant(parameter);
+        dispatch_type = DispatchTypes::TimeBased(parameter);
     } else if args[2].to_lowercase() == "popbased" {
-        dispatch_type = DispatchTypes::Constant(parameter);
+        dispatch_type = DispatchTypes::PopBased(parameter);
+    } else if args[2].to_lowercase() == "translink" {
+        dispatch_type = DispatchTypes::TransLink();
     } else {
-        println!("INVALID DISPATCH METHOD, USE ONE OF THE FOLLOWING: <constant|timebased|popbased>");
+        println!("INVALID DISPATCH METHOD, USE ONE OF THE FOLLOWING: <constant|timebased|popbased|translink>");
         return
     }
 
-
-
-    
     // Initalize
     // Create Millenium Line
     let m_line_station_names = ["VCC-Clark", "Commercial–Broadway", "Renfrew", "Rupert", "Gilmore", "Brentwood Town Centre",
@@ -604,14 +638,20 @@ fn main() {
     // RNG streams (For CRN)
     let customer_arrival_rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
 
+    // Distribution for TransLinks dispact times by the hour
+    // vec![0.1, 0.3, 0.7, 0.8, 1.1, 1.5, 1.1, 0.8, 0.7, 0.85, 1.2, 1.35, 1.6, 1.35, 1.1, 0.9, 0.7, 0.5, 0.3, 0.1, 0.0];
+    let tl_ait_periods = 
+       vec![8.0, 8.0, 6.0, 6.0, 6.0, 4.0, 6.0, 6.0, 6.0, 6.0, 6.0, 4.0, 3.0, 4.0, 6.0, 6.0, 8.0, 8.0, 8.0, 10.0, 10.0];
+
     // Create simulator object
     let mut sim : Simulation = Simulation {line : millennium_line, train_list : train_list, future_event_list : future_event_list, 
-        time_elapsed : 0.0, customer_iat : customer_arrival_rng, bookkeeping : Bookkeeper::new(), dispatch_type: dispatch_type};
+        time_elapsed : 0.0, customer_iat : customer_arrival_rng, bookkeeping : Bookkeeper::new(), dispatch_type: dispatch_type, translink_sampler : tl_ait_periods};
 
     // Add inital events
     // Train releases
     sim.add_event(EventTypes::TrainRelease(EASTWARD), 0.0);
     sim.add_event(EventTypes::TrainRelease(WESTWARD), 0.0);
+    sim.add_event(EventTypes::Dummy(), SIMULATION_LENGTH);
 
     // CUstomer arrivals
     for i in 0..sim.line.length() {
@@ -625,6 +665,9 @@ fn main() {
         else {sim.line.west_trains.push_back(i);}
         dir *= -1;
     }
+
+    // START SIMULATION TIMER
+    let timer = time::Instant::now();
 
     // Event Loop
     while sim.time_elapsed < SIMULATION_LENGTH && !sim.future_event_list.is_empty()  {
@@ -646,21 +689,42 @@ fn main() {
         }
     }
 
+    // Stop timer
+    let sim_realtime = timer.elapsed();
+    println!("-- Time to execute: {:.2?} --", sim_realtime);
+
     // Generate and print report
 
     // Sim needs to do some extra work for train related stats
     let mut usage_perecnt : f32;
+    let mut max_usage_percent : f32 = 0.0;
+    let mut time_full_percent : f32;
     for i in 0..usize::from(NUMBER_OF_TRAINS) {
         usage_perecnt =  (sim.train_list[i].percent_full_total * 100.0) / sim.train_list[i].percent_full_test_amount;
-        if PRINT_TRAIN_INFO {println!("Train {}: Usage Percent {}", i, usage_perecnt);}
+        time_full_percent = (sim.train_list[i].times_full * 100.0) / sim.train_list[i].percent_full_test_amount;
+        if PRINT_TRAIN_INFO {println!("Train {}: Usage percent {}% | Full percent {}%", i, usage_perecnt, time_full_percent);}
         sim.bookkeeping.total_trains += 1.0;
         sim.bookkeeping.average_train_util_percent += usage_perecnt;
+        sim.bookkeeping.time_train_full_percent += time_full_percent;
+        if max_usage_percent < (sim.train_list[i].percent_full_max * 100.0) {
+            max_usage_percent = sim.train_list[i].percent_full_max * 100.0;
+        }
     }
 
+    sim.bookkeeping.max_train_util_percent = max_usage_percent;
     sim.bookkeeping.average_train_util_percent /= sim.bookkeeping.total_trains;
+    sim.bookkeeping.time_train_full_percent /= sim.bookkeeping.total_trains;
+
+    let title_string : String;
+    
+    title_string = match sim.dispatch_type {
+        DispatchTypes::Constant(lambda) => format!("Results of simulation using a constant dispatch with lambda of {} (SEED = {})", lambda, seed).to_string(),
+        DispatchTypes::TransLink() => format!("Results of simulation using TransLink's dispatch system (SEED = {})", seed).to_string(),
+        _ => "Simulation ran with unimplemented dispatch type... You shouldn't be seeing this message!".to_string(),
+    };
 
     // Prints the report
-    sim.bookkeeping.generate_report();
+    sim.bookkeeping.generate_report(title_string);
 
     // Empty FEL
     sim.future_event_list.clear();
