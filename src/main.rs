@@ -59,6 +59,7 @@ struct Simulation { // Holds the Line and the list of trains on it
     bookkeeping : Bookkeeper,
     dispatch_type : DispatchTypes,
     translink_sampler : Vec<f32>,
+    timebased_sampler : Vec<f32>,
 }
 
 
@@ -88,6 +89,28 @@ impl Simulation {
     
         // Note: No linear interpolation is used. Customers want easy to understand iats and decimals are not that.
         return self.translink_sampler[bottom_hour];
+    }
+
+    fn timebased_time_sampler(&self, offset : f32) -> f32 {
+        // Given a time, what should the rate that we send out trains be
+        // Based on translink's own stats: https://www.translink.ca/schedules-and-maps/skytrain
+    
+        // Make sure to clamp time to simulation time
+        let mins_2_hours = clamp(self.time_elapsed + offset, 0.0, SIMULATION_LENGTH) / 60.0;
+        let bottom_hour : usize = mins_2_hours.floor() as usize;
+    
+        // Note: No linear interpolation is used. Customers want easy to understand iats and decimals are not that.
+        return self.timebased_sampler[bottom_hour];
+    }
+
+    fn population_sampler(&self, multi : f32) -> f32 {
+        // A function that uses the amount of watinng customers to determine how soon to send out the next train
+        // Min of 10.0, max of 2.5
+        // Fastest dispatch when 6 * TRAIN CAPACITY people are waiting
+        let trainfulls = self.bookkeeping.currently_waiting_customers / TRAIN_CAPACITY;
+        let trainfuls_normalized = clamp(trainfulls * multi / 6.0, 0.0, 1.0);
+
+        return ((1.0 - trainfuls_normalized) * 10.0 ) + (trainfuls_normalized * 2.5);
     }
 }
 
@@ -162,11 +185,11 @@ impl Bookkeeper {
         println!("{}\n", title);
         println!("Customers:");
         print!("    TOTAL CUSTOMERS BOARDED / DEPARTED / GENERATED: {} / {} / {}\n", self.total_customers_boarded, self.total_customers_departed, self.total_customers);
-        print!("    AVERAGE WAIT TIME: {:.1}\n", self.total_station_waiting_time / self.total_customers_boarded);
-        print!("    MAXIMUM WAIT TIME: {:.1} @ minute {}\n", self.max_station_waiting_time, self.max_station_waiting_time_t);
-        print!("    AVERAGE CUSTOMERS WAITING: {:.1}\n", self.average_customers_waiting);
-        print!("    MAXIMUM CUSTOMERS WAITING: {:.1} @ minute {}\n", self.max_customers_waiting, self.max_customers_waiting_t);
-        print!("    AVERAGE THROUGHPUT (customers/hour): {:.1}\n", self.total_customers_departed / 20.0); // Customers per hour
+        print!("    AVERAGE WAIT TIME: {:.2}\n", self.total_station_waiting_time / self.total_customers_boarded);
+        print!("    MAXIMUM WAIT TIME: {:.2} @ minute {}\n", self.max_station_waiting_time, self.max_station_waiting_time_t);
+        print!("    AVERAGE CUSTOMERS WAITING: {:.2}\n", self.average_customers_waiting);
+        print!("    MAXIMUM CUSTOMERS WAITING: {:.2} @ minute {}\n", self.max_customers_waiting, self.max_customers_waiting_t);
+        print!("    AVERAGE THROUGHPUT (customers/hour): {:.2}\n", self.total_customers_departed / 20.0); // Customers per hour
 
         println!("\nTrain Usage:");
         print!("    AVERAGE PERCENT OF TRAINS DEPLOYED (total={}): {:.2}%\n", NUMBER_OF_TRAINS, self.average_trains_deployed);
@@ -204,7 +227,7 @@ impl Station {
         // Returns an actual iat given our current minute
 
         // Table of the per-hour multiplier to iat of each station
-        let hour_periods = vec![0.1, 0.3, 0.7, 0.8, 1.25, 1.5, 1.25, 1.0, 0.9, 1.0, 1.2, 1.4, 1.75, 1.4, 1.1, 0.9, 0.7, 0.5, 0.3, 0.1, 0.0];
+        let hour_periods = vec![0.1, 0.3, 0.7, 0.8, 1.25, 1.5, 1.25, 1.0, 0.9, 1.0, 1.2, 1.5, 1.75, 1.5, 1.2, 0.9, 0.7, 0.5, 0.3, 0.2, 0.1];
         //let hour_periods = vec![1.0; 21];
         
         let mins_2_hours = time / 60.0;
@@ -571,6 +594,8 @@ fn release_train(mut sim : Simulation, direction : i8) -> Simulation {
     match sim.dispatch_type {
         DispatchTypes::Constant(lambda) => sim.add_event(EventTypes::TrainRelease(direction), sim.time_elapsed + lambda),
         DispatchTypes::TransLink() => sim.add_event(EventTypes::TrainRelease(direction), sim.time_elapsed + sim.translink_time_sampler()),
+        DispatchTypes::TimeBased(offset) => sim.add_event(EventTypes::TrainRelease(direction), sim.time_elapsed + sim.timebased_time_sampler(offset)),
+        DispatchTypes::PopBased(multi) => sim.add_event(EventTypes::TrainRelease(direction), sim.time_elapsed + sim.population_sampler(multi)),
         _ => println!("Error: Somehow a dispatch type has not been defined..."),
     }
 
@@ -679,10 +704,13 @@ fn main() {
     // vec![0.1, 0.3, 0.7, 0.8, 1.1, 1.5, 1.1, 0.8, 0.7, 0.85, 1.2, 1.35, 1.6, 1.35, 1.1, 0.9, 0.7, 0.5, 0.3, 0.1, 0.0];
     let tl_ait_periods = 
        vec![8.0, 8.0, 6.0, 6.0, 6.0, 4.0, 6.0, 6.0, 6.0, 6.0, 6.0, 4.0, 3.0, 4.0, 6.0, 6.0, 8.0, 8.0, 8.0, 10.0, 10.0];
+    let time_ait_periods = 
+       vec![10.0, 9.0, 8.0, 7.0, 6.0, 5.0, 6.0, 7.0, 7.0, 6.0, 5.0, 4.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 10.0];
 
     // Create simulator object
     let mut sim : Simulation = Simulation {line : millennium_line, train_list : train_list, future_event_list : future_event_list, 
-        time_elapsed : 0.0, customer_iat : customer_arrival_rng, bookkeeping : Bookkeeper::new(), dispatch_type: dispatch_type, translink_sampler : tl_ait_periods};
+        time_elapsed : 0.0, customer_iat : customer_arrival_rng, bookkeeping : Bookkeeper::new(), dispatch_type: dispatch_type, 
+        translink_sampler : tl_ait_periods, timebased_sampler: time_ait_periods};
 
     // Add inital events
     // Train releases
@@ -757,6 +785,8 @@ fn main() {
     title_string = match sim.dispatch_type {
         DispatchTypes::Constant(lambda) => format!("Results of simulation using a constant dispatch with lambda of {} (SEED = {})", lambda, seed).to_string(),
         DispatchTypes::TransLink() => format!("Results of simulation using TransLink's dispatch system (SEED = {})", seed).to_string(),
+        DispatchTypes::TimeBased(offset) => format!("Results of simulation using a time-based dispatch system with an offset of {} (SEED = {})", offset, seed).to_string(),
+        DispatchTypes::PopBased(multi) => format!("Results of simulation using a population-based dispatch system (m = {}) (SEED = {})", multi, seed).to_string(),
         _ => "Simulation ran with unimplemented dispatch type... You shouldn't be seeing this message!".to_string(),
     };
 
