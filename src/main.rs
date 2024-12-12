@@ -406,7 +406,7 @@ fn poll_stats( mut sim : Simulation) -> Simulation {
 
     // Customers waiting
     sim.bookkeeping.average_customers_waiting += sim.bookkeeping.currently_waiting_customers / SIMULATION_LENGTH;
-    if sim.bookkeeping.max_customers_waiting < sim.bookkeeping.currently_waiting_customers {
+    if sim.bookkeeping.max_customers_waiting < sim.bookkeeping.currently_waiting_customers{
         sim.bookkeeping.max_customers_waiting = sim.bookkeeping.currently_waiting_customers;
         sim.bookkeeping.max_customers_waiting_t = sim.time_elapsed;
     }
@@ -491,7 +491,7 @@ fn train_departure(mut sim : Simulation, train_id: usize, station_id: usize) -> 
             boarding_customer.tbt = sim.time_elapsed;
 
             sim.bookkeeping.total_station_waiting_time += boarding_customer.tbt - boarding_customer.sat; // Total waiting time
-            if boarding_customer.tbt - boarding_customer.sat > sim.bookkeeping.max_station_waiting_time { // Max wait time check
+            if boarding_customer.tbt - boarding_customer.sat > sim.bookkeeping.max_station_waiting_time && sim.time_elapsed > 60.0{ // Max wait time check
                 sim.bookkeeping.max_station_waiting_time = boarding_customer.tbt - boarding_customer.sat;
                 sim.bookkeeping.max_station_waiting_time_t = sim.time_elapsed;
             }
@@ -511,7 +511,7 @@ fn train_departure(mut sim : Simulation, train_id: usize, station_id: usize) -> 
             boarding_customer.tbt = sim.time_elapsed;
 
             sim.bookkeeping.total_station_waiting_time += boarding_customer.tbt - boarding_customer.sat; // Total waiting time
-            if boarding_customer.tbt - boarding_customer.sat > sim.bookkeeping.max_station_waiting_time { // Max wait time check
+            if boarding_customer.tbt - boarding_customer.sat > sim.bookkeeping.max_station_waiting_time && sim.time_elapsed > 60.0{ // Max wait time check
                 sim.bookkeeping.max_station_waiting_time = boarding_customer.tbt - boarding_customer.sat;
                 sim.bookkeeping.max_station_waiting_time_t = sim.time_elapsed;
             }
